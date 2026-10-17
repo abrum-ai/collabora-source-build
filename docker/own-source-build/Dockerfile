@@ -23,6 +23,8 @@ COPY build-source.sh /usr/local/bin/build-source
 COPY Dockerfile upstream.lock.json /source-recipe/
 USER builder
 WORKDIR /build
+# Samurai is the pinned Alpine Ninja provider; GNU make flags do not constrain it.
+ENV SAMUFLAGS="-j 1"
 RUN sh /usr/local/bin/build-source
 
 # Collected source evidence, not a complete offer for Alpine/base packages.

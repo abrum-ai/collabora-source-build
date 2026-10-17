@@ -250,9 +250,8 @@ def decoded_parts(source, codec):
 
 class BoundedTarInfo(tarfile.TarInfo):
     """Bound extension metadata before the stdlib allocates or follows it."""
-    @classmethod
-    def frombuf(cls, buf, encoding, errors):
-        info = super().frombuf(buf, encoding, errors)
+    @staticmethod
+    def _check_header(info):
         need(0 <= info.size <= MAX_FILE and info.type != tarfile.GNUTYPE_SPARSE,
              'Oversized or unsupported sparse TAR header')
         if info.type in [tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
@@ -261,15 +260,41 @@ class BoundedTarInfo(tarfile.TarInfo):
         return info
 
     @classmethod
-    def fromtarfile(cls, archive):
+    def frombuf(cls, buf, encoding, errors):
+        if hasattr(tarfile.TarInfo, '_frombuf'):
+            return cls._frombuf(buf, encoding, errors)
+        return cls._check_header(super().frombuf(buf, encoding, errors))
+
+    @classmethod
+    def _frombuf(cls, buf, encoding, errors, *, dircheck=True):
+        # Newer stdlibs use this directly for recursive PAX/GNU headers.
+        return cls._check_header(super()._frombuf(buf, encoding, errors, dircheck=dircheck))
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _header_budget(archive):
         archive.strict_headers = getattr(archive, 'strict_headers', 0) + 1
         depth = getattr(archive, 'strict_depth', 0)
         need(archive.strict_headers <= MAX_TAR_MEMBERS and depth < 32, 'Excessive TAR extension headers')
         archive.strict_depth = depth + 1
         try:
-            return super().fromtarfile(archive)
+            yield
         finally:
             archive.strict_depth = depth
+
+    @classmethod
+    def fromtarfile(cls, archive):
+        # Select the actual stdlib dispatch without counting its public wrapper
+        # and private implementation twice. Older stdlibs recurse via this hook.
+        if hasattr(tarfile.TarInfo, '_fromtarfile'):
+            return cls._fromtarfile(archive)
+        with cls._header_budget(archive):
+            return super().fromtarfile(archive)
+
+    @classmethod
+    def _fromtarfile(cls, archive, *, dircheck=True):
+        with cls._header_budget(archive):
+            return super()._fromtarfile(archive, dircheck=dircheck)
 
     def _proc_gnusparse_00(self, *args):
         raise ValueError('Sparse TAR metadata is unsupported')

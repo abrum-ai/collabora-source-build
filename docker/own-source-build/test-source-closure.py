@@ -816,6 +816,49 @@ class SourceClosure(unittest.TestCase):
                             lambda:q.inspection_member(path, None, 100000)]:
                 with self.assertRaises(ValueError):consume()
 
+    def test_tar_metadata_budget_precedes_the_actual_stdlib_payload_read(self):
+        class HeaderOnly(io.BytesIO):
+            reads = None
+            def read(self, size=-1):
+                self.reads.append(size)
+                if size < 0 or size > 512:
+                    raise AssertionError('Metadata payload read before budget admission')
+                return super().read(size)
+        for kind in [tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK]:
+            with self.subTest(kind=kind):
+                info = tarfile.TarInfo('oversized-metadata'); info.type = kind; info.size = 4 * 1024**2 + 1
+                stream = HeaderOnly(info.tobuf(format=tarfile.GNU_FORMAT) + bytes(1024)); stream.reads = []
+                with self.assertRaisesRegex(ValueError, 'extension metadata'):
+                    tarfile.open(fileobj=stream, mode='r:', tarinfo=q.BoundedTarInfo)
+                self.assertEqual(stream.reads, [512])
+
+    def test_tar_recursive_pax_and_gnu_headers_count_once_at_the_exact_budget(self):
+        for format in [tarfile.PAX_FORMAT, tarfile.GNU_FORMAT]:
+            with self.subTest(format=format), tempfile.TemporaryDirectory() as tmp:
+                stream = io.BytesIO(); long_name = 'long-path-' * 30
+                with tarfile.open(fileobj=stream, mode='w', format=format) as archive:
+                    for name in [long_name, 'second-file']:
+                        info = tarfile.TarInfo(name); info.size = 7
+                        archive.addfile(info, io.BytesIO(b'content'))
+                path = Path(tmp) / 'source.tar'; path.write_bytes(stream.getvalue())
+                # One extension, two regular headers and one end marker.
+                with patch.object(q, 'MAX_TAR_MEMBERS', 4):
+                    self.assertEqual([name for name, _, _ in q.members(path)], [long_name, 'second-file'])
+                    self.assertEqual(q.tar_member_bytes(path, long_name), b'content')
+                with patch.object(q, 'MAX_TAR_MEMBERS', 3), self.assertRaisesRegex(ValueError, 'extension headers'):
+                    next(q.members(path))
+
+    def test_tar_recursive_gnu_depth_has_a_valid_boundary_and_no_private_dispatch_bypass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = b'long-gnu-name-' * 20
+            info = tarfile.TarInfo('././@LongLink'); info.type = tarfile.GNUTYPE_LONGNAME; info.size = len(value) + 1
+            prefix = info.tobuf(format=tarfile.GNU_FORMAT) + value + b'\0' + bytes(-(len(value) + 1) % 512)
+            path = Path(tmp) / 'source.tar'
+            path.write_bytes(prefix * 31 + self.tar_bytes('placeholder'))
+            self.assertEqual(q.tar_member_bytes(path, value.decode()), b'original notice')
+            path.write_bytes(prefix * 32 + self.tar_bytes('placeholder'))
+            with self.assertRaisesRegex(ValueError, 'extension headers'):next(q.members(path))
+
 
 if __name__ == '__main__':
     unittest.main()

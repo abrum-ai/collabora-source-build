@@ -107,7 +107,12 @@ padding, and no second archive or nonzero trailing data. Concatenated compressio
 frames are fully decoded and must together contain just that one valid TAR;
 truncated/corrupt frames or ignored compressed garbage cannot pass. Metadata
 headers are bounded before allocation, excessive nesting/counts and sparse TAR
-formats fail closed. Ordinary POSIX/PAX/GNU archives and canonical zero padding
+formats fail closed. These guards cover both the legacy public parsing hooks
+and the internal recursive buffer/header dispatch used by Python 3.12. Physical
+headers are counted once, and the stdlib's directory-normalization flag is
+preserved. Source checks must run on the actual supported interpreters (including
+3.9 and 3.12), with valid PAX/GNU controls and unchanged budget assertions.
+Ordinary POSIX/PAX/GNU archives and canonical zero padding
 remain supported. ZIP readers require a ZIP header at the start; an appended ZIP
 cannot disguise a nonzero TAR tail. This data spool is not an extracted directory tree and needs
 up to the decoded budget in ephemeral disk in addition to the OCI download.

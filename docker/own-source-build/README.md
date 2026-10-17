@@ -12,7 +12,24 @@ detached full-commit fetch and one compilation job. It is subject to MPL-2.0;
 see `LICENSE`. Copyright and license notices in upstream sources are retained.
 The engine also carries its original MPL/LGPL and third-party notices.
 
-The candidate workflow is manual and restricted to a public repository and the
+The pinned internal Argon2 rule needs an explicit ExternalProject/header
+prerequisite. The source script applies a narrowly hash-checked MPL-2.0 build-rule
+fix and keeps bundled Argon2 enabled. The source archive contains that actual
+modified Git tree, with a fixed upstream timestamp. The accompanying offer includes
+a separate patch, base/tree/file/archive hashes and the original Argon2 CC0/Apache license text;
+`source-modifications.json` records these bindings. The downloaded original
+Argon2 archive and the upstream Argon2 build patches remain in the source offer.
+These are component evidence, not a completed independent license review.
+
+The Actions-based path described below is suspended and retained only as historical
+build/provenance documentation. It does not authorize a dispatch, rerun or package
+publication. The regular successor must run through a separately reviewed CLI path
+without Actions or `GITHUB_TOKEN`; an actual successful CLI engine build is still
+unqualified. Source, license and artifact identity checks remain required.
+
+## Historical suspended Actions path
+
+The former candidate workflow was manual and restricted to a public repository and the
 standard native `ubuntu-24.04` / `ubuntu-24.04-arm` runners. ARM64 is the default;
 AMD64 requires a prior successful ARM64 run at the same build revision. It has no private
 repository checkout, cloud deployment, paid runner or Actions cache/artifact
@@ -75,3 +92,13 @@ Primary sources:
 - [GHCR initial visibility and repository binding](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 - [Mozilla MPL distribution FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/)
 - [MPL 2.0, executable distribution section 3.2](https://www.mozilla.org/en-US/MPL/2.0/#distribution-of-executable-form)
+
+## Bounded source-measurement candidate
+
+This revision is prepared for a non-publishing Linux/AMD64 experiment with an
+unchanged 2-GiB builder memory limit and a 4-GiB temporary state volume.
+The builder stage also bounds the Alpine Samurai/Ninja provider to one job.
+A complete build within these limits has not been demonstrated. No result
+from this experiment is a source/license clearance or an editor acceptance.
+The four historical GitHub Actions workflows remain suspended; do not dispatch
+or rerun them to execute this experiment.
