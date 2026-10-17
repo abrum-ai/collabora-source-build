@@ -73,6 +73,24 @@ manifest = {
 SOURCE_MANIFEST
 }
 # END PINNED SOURCE FUNCTIONS
+# BEGIN FONT CONFIGURATION CHECK
+verify_font_configuration() {
+    font_config=${1:-config_host.mk}
+    for font_key in BUILD_TYPE WITH_FONTS DO_FETCH_TARBALLS; do
+        font_lines=$(grep -c "^export $font_key=" "$font_config") || return 1
+        test "$font_lines" -eq 1 || return 1
+    done
+    grep -Fx 'export WITH_FONTS=TRUE' "$font_config" >/dev/null || return 1
+    grep -Fx 'export DO_FETCH_TARBALLS=TRUE' "$font_config" >/dev/null || return 1
+    font_types=$(sed -n 's/^export BUILD_TYPE=//p' "$font_config") || return 1
+    printf '%s\n' "$font_types" | awk '
+        {for(i=1;i<=NF;i++) {
+            if($i !~ /^[A-Za-z0-9_]+$/ || $i=="NOTO_FONT") bad=1
+            if($i=="MORE_FONTS") standard++
+        }}
+        END {exit (bad || standard!=1)}' || return 1
+}
+# END FONT CONFIGURATION CHECK
 git init online
 git -C online remote add origin https://github.com/CollaboraOnline/online.mirror.git
 git -C online fetch --depth=1 origin "$UPSTREAM_COMMIT"
@@ -90,7 +108,14 @@ mkdir -p /build/tarballs /build/instdir /build/offer/notices
 cd /build/online/engine
 ./autogen.sh --with-distro=CPLinux-LOKit --without-package-format \
     --disable-symbols --without-java --with-lang=en-US \
+    --with-fonts --disable-noto-font \
     --without-system-argon2 --with-parallelism=1 --with-external-tar=/build/tarballs
+# Keep the standard font collection. Only the optional large additional Noto
+# collection is excluded; the runtime's packaged CJK/DejaVu fonts stay present.
+# BUILD_TYPE is the actual module/download selector, not an unexported option.
+verify_font_configuration config_host.mk
+grep -E '^export (BUILD_TYPE|WITH_FONTS|DO_FETCH_TARBALLS)=' config_host.mk > /build/offer/notices/engine-font-policy.txt
+printf '[source-build] standard_fonts=true optional_extra_noto=false\n'
 make -j1
 mkdir -p /build/instdir/opt
 cp -a instdir /build/instdir/opt/collaboraoffice
