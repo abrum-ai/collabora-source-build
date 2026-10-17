@@ -118,7 +118,10 @@ grep -E '^export (BUILD_TYPE|WITH_FONTS|DO_FETCH_TARBALLS)=' config_host.mk > /b
 printf '[source-build] standard_fonts=true optional_extra_noto=false\n'
 make -j1
 mkdir -p /build/instdir/opt
-cp -a instdir /build/instdir/opt/collaboraoffice
+# One filesystem: retain the same installed files through hard links instead
+# of allocating a second complete engine copy. No source/output file is edited
+# through these links; upstream source trees are archived before cleanup.
+cp -al instdir /build/instdir/opt/collaboraoffice
 cd /build/online
 ./autogen.sh
 ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \

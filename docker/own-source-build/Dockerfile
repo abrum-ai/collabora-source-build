@@ -24,8 +24,16 @@ COPY Dockerfile upstream.lock.json /source-recipe/
 USER builder
 WORKDIR /build
 # Samurai is the pinned Alpine Ninja provider; GNU make flags do not constrain it.
-ENV SAMUFLAGS="-j 1"
-RUN sh /usr/local/bin/build-source
+# A one-off full build must not retain a second compiler-object cache.
+ENV SAMUFLAGS="-j 1" CCACHE_DISABLE=1
+# Keep the actual installed engine and complete archived source/notice offer.
+# Raw checkout/object trees are build scratch, not runtime/source-offer layers.
+RUN sh /usr/local/bin/build-source && \
+    test -s /build/offer/online-source.tar.zst && \
+    test -s /build/offer/engine-external-sources.tar.zst && \
+    test -s /build/offer/SHA256SUMS && \
+    cd /build/offer && sha256sum -c SHA256SUMS && \
+    rm -rf /build/online /build/tarballs /home/builder/.cache
 
 # Collected source evidence, not a complete offer for Alpine/base packages.
 # The prepared workflow allows this only inside verified private staging.
