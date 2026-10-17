@@ -81,8 +81,9 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = Linux
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          python3 test-source-closure.py
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 test-source-closure.py
           python3 - <<'PY'
           import hashlib,os,pathlib,re,subprocess
           name=os.environ['REVIEW_FILE']; assert re.fullmatch(r'reviews/[A-Za-z0-9_.-]+\.json',name)

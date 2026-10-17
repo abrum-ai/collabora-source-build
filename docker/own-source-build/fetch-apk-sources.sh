@@ -61,19 +61,9 @@ while IFS=$'\t' read -r origin commit; do
       REPODEST=/out/package abuild -d -s /out/downloads validate fetch srcpkg
     ' sh "$directory"
   active=''
-  python3 - "$evidence/apk-origins.json" "$origin" "$commit" "$out" <<'PY'
-import json,pathlib,sys
-rows=json.load(open(sys.argv[1]))
-row=next(r for r in rows if r['origin']==sys.argv[2] and r['commit']==sys.argv[3])
-paths={pathlib.PurePosixPath(v).name for v in (pathlib.Path(sys.argv[4])/'packages.txt').read_text().split()}
-for pkg in row['packages']:
-    assert pkg['name']+'-'+pkg['version']+'.apk' in paths, 'APKBUILD does not produce observed package/version'
-PY
-  mapfile -t archives < <(find "$out/package/src" -maxdepth 1 -type f -name '*.src.tar.gz')
-  test "${#archives[@]}" = 1
-  cp -- "${archives[0]}" "$evidence/apk-sources/$origin-$commit.src.tar.gz"
-  cp -- "$work/recipe.tar" "$evidence/apk-sources/$origin-$commit.aports.tar"
-  cp -- "$out/packages.txt" "$evidence/apk-sources/$origin-$commit.packages.txt"
+  python3 qualify-source.py collect-apk-source --origins "$evidence/apk-origins.json" \
+    --origin "$origin" --commit "$commit" --directory "$out" --recipe "$work/recipe.tar" \
+    --destination "$evidence/apk-sources" --output "$work/source-output-$count.json"
   # The final source package includes the verified upstream archives, local
   # patches, APKBUILD, triggers and installation scripts. Preserve that exact
   # archive and recipe; discard only this source fetch's duplicate scratch data.

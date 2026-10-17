@@ -23,11 +23,15 @@ jobs:
           persist-credentials: false
           sparse-checkout: docker/own-source-build
       - name: Standard runner and registry tooling only
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = Linux
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 test-source-closure.py
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y skopeo
