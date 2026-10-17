@@ -1,0 +1,185 @@
+name: Full Collabora source build
+run-name: Full Collabora source build (${{ inputs.architecture }})
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Build ARM64 first; AMD64 requires its successful same-source run
+        type: choice
+        options: [arm64, amd64]
+        required: true
+        default: arm64
+      stage_private:
+        description: Internal private staging, including license-only package bootstrap if absent
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: full-source-build
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.event.repository.private == false
+    timeout-minutes: 350
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      PLATFORM: linux/${{ inputs.architecture }}
+      ARCH: ${{ inputs.architecture }}
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/own-source-build
+      - name: Verify public-only context and fixed inputs
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          test "$REPO_VISIBILITY" = public
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$(jq -r .commit upstream.lock.json)" = 28a3cf1a0edd6712e4079fdad8e46f5cbe6b8af8
+          test "$(git status --porcelain)" = ''
+      - name: Keep AMD64 after successful ARM64 on the same build revision
+        if: inputs.architecture == 'amd64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          count=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/source-build.yml/runs" \
+            -f event=workflow_dispatch -f status=success -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.display_title == "Full Collabora source build (arm64)")] | length')
+          test "$count" -gt 0
+      - name: Prepare only this disposable standard runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          # No repository or Docker data is deleted. These are stock SDKs on
+          # this disposable runner; never run this on a workstation or server.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python3 -c 'import os; m={x.split(":")[0]:int(x.split()[1])*1024 for x in open("/proc/meminfo") if x.startswith("MemAvailable:")}; d=os.statvfs("."); print({"available_ram":m["MemAvailable"],"free_disk":d.f_bavail*d.f_frsize}); assert m["MemAvailable"]>=11*1024**3; assert d.f_bavail*d.f_frsize>=40*1024**3'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        with:
+          version: v0.38.0
+          cache-binary: false
+          driver: docker-container
+          buildkitd-flags: --oci-worker-gc=true
+          driver-opts: |
+            image=moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+            memory=12g
+            cpu-quota=300000
+            cpu-period=100000
+      - name: Login only for explicitly requested private staging
+        if: inputs.stage_private
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify private package or seed license-only metadata once
+        id: private
+        if: inputs.stage_private
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 assert-private-package.py --repository "$GITHUB_REPOSITORY" --fetch \
+            --owner-type "$OWNER_TYPE" > "$RUNNER_TEMP/private-package-checked.json"
+          state=$?
+          set -e
+          case "$state" in
+            0) ;;
+            3)
+              # A 404 permits only an OCI layer of LICENSE/build-inputs.json.
+              # No runtime, base APK or source archive is included here.
+              seed="ghcr.io/${GITHUB_REPOSITORY,,}:metadata-bootstrap-${GITHUB_SHA}"
+              docker buildx build --platform "$PLATFORM" --target staging-bootstrap --provenance=false \
+                --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --metadata-file "$RUNNER_TEMP/bootstrap-receipt.json" --tag "$seed" --push .
+              # Never infer privacy or repository binding from its default.
+              python3 assert-private-package.py --repository "$GITHUB_REPOSITORY" --fetch \
+                --owner-type "$OWNER_TYPE" > "$RUNNER_TEMP/private-package-checked.json"
+              ;;
+            *) exit "$state" ;;
+          esac
+          printf 'package_id=%s\n' "$(jq -er .id "$RUNNER_TEMP/private-package-checked.json")" >> "$GITHUB_OUTPUT"
+      - name: Build complete engine, server, browser and static image checks
+        run: |
+          set -euo pipefail
+          docker buildx build --platform "$PLATFORM" --target test --output type=cacheonly --progress plain .
+          docker buildx build --platform "$PLATFORM" --target runtime --load --provenance=false \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" --tag cool-source:test --progress plain .
+      - name: Read-only unprivileged startup and Discovery check
+        run: |
+          set -euo pipefail
+          cleanup() { docker logs cool-source-smoke || true; docker rm -f cool-source-smoke || true; }
+          trap cleanup EXIT
+          docker run --detach --name cool-source-smoke --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges:true --user 1001:1001 \
+            --memory 768m --memory-swap 768m --cpus 1 --pids-limit 128 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            cool-source:test \
+            --o:security.capabilities=false --o:security.seccomp=true \
+            --o:security.enable_macros_execution=false --o:mount_jail_tree=false \
+            --o:ssl.enable=false --o:net.proto=IPv4 --o:num_prespawn_children=1 \
+            '--o:logging.file[@enable]=false' \
+            --o:sys_template_path=/opt/cool/systemplate \
+            --o:child_root_path=/tmp/children --o:cache_files.path=/tmp/cache \
+            --o:file_server_root_path=/usr/share/coolwsd
+          for attempt in $(seq 1 60); do
+            if docker exec cool-source-smoke wget -q -O /tmp/discovery.xml http://127.0.0.1:9980/hosting/discovery; then break; fi
+            sleep 2
+          done
+          docker exec cool-source-smoke grep -q wopi-discovery /tmp/discovery.xml
+          docker exec cool-source-smoke sh -c 'pid=$(pgrep -x coolforkit-ns | head -n1); test -n "$pid"; grep -q /opt/collaboraoffice/program/libmergedlo.so "/proc/$pid/maps"'
+          docker exec cool-source-smoke sh -c 'test "$(id -u)" = 1001; grep -q "^NoNewPrivs:.*1" /proc/1/status; grep -q "^CapEff:.*0000000000000000" /proc/1/status; grep -q "^Seccomp:.*2" /proc/1/status; test ! -w /etc/coolwsd/coolwsd.xml; ! touch /rootfs-write-probe'
+          docker inspect cool-source-smoke --format '{{json .HostConfig}}'
+          docker stats --no-stream cool-source-smoke
+      - name: Stage runtime and source evidence privately; public distribution stays blocked
+        if: inputs.stage_private
+        env:
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          EXPECTED_PACKAGE_ID: ${{ steps.private.outputs.package_id }}
+        run: |
+          set -euo pipefail
+          private_guard() {
+            python3 assert-private-package.py --repository "$REPOSITORY" --fetch \
+              --owner-type "$OWNER_TYPE" \
+              --expected-id "$EXPECTED_PACKAGE_ID" > /dev/null
+          }
+          image="ghcr.io/${REPOSITORY,,}:private-runtime-${GITHUB_SHA}-${GITHUB_RUN_ID}-${ARCH}"
+          sources="ghcr.io/${REPOSITORY,,}:private-source-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${ARCH}"
+          private_guard
+          docker buildx build --platform "$PLATFORM" --target runtime --provenance=mode=max \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --metadata-file runtime-receipt.json --tag "$image" --push .
+          private_guard
+          docker buildx build --platform "$PLATFORM" --target source-evidence --provenance=mode=max \
+            --metadata-file sources-receipt.json --tag "$sources" --push .
+          private_guard
+          runtime_digest=$(jq -er '."containerimage.digest"' runtime-receipt.json)
+          sources_digest=$(jq -er '."containerimage.digest"' sources-receipt.json)
+          test -n "$runtime_digest" && test -n "$sources_digest"
+          test "$(docker image inspect cool-source:test --format '{{.Id}}')" = "$(jq -er '."containerimage.config.digest"' runtime-receipt.json)"
+          printf '%s\n' "Runtime: $image@$runtime_digest" "Sources: $sources@$sources_digest" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Source: 28a3cf1a0edd6712e4079fdad8e46f5cbe6b8af8' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Private internal staging only. Public binary distribution is blocked: full APK/base/third-party corresponding-source closure is unverified.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Build-only result
+        if: ${{ !inputs.stage_private }}
+        run: echo 'Build and Discovery only; no image or source evidence pushed.' >> "$GITHUB_STEP_SUMMARY"
