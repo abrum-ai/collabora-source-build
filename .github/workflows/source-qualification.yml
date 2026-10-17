@@ -1,0 +1,231 @@
+name: Qualify existing source-built artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Collect a candidate or inspect an existing one without writes
+        required: true
+        type: choice
+        options: [collect, inspect]
+        default: collect
+      build_run:
+        description: Successful original source-build run ID
+        required: true
+        type: string
+      build_commit:
+        description: Exact full commit of that successful source build
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: choice
+        options: [arm64, amd64]
+        default: arm64
+      runtime_digest:
+        description: Original private runtime sha256 digest from the producing run
+        required: true
+        type: string
+      source_digest:
+        description: Original private source-evidence sha256 digest from the producing run
+        required: true
+        type: string
+      closure_digest:
+        description: Exact private candidate SHA256 digest for read-only inspection
+        required: false
+        type: string
+      selection_file:
+        description: Optional committed inspections/*.json candidate notice/member request
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  # Readers cannot occupy or replace the engine/collector/publisher pending slot.
+  group: ${{ inputs.operation == 'inspect' && format('source-closure-inspection-{0}', github.run_id) || 'full-source-build' }}
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.event.repository.visibility == 'public' && inputs.operation != 'inspect'
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/own-source-build
+      - name: Admit only a disposable public standard runner
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 test-source-closure.py
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python3 -c 'import os; m={x.split(":")[0]:int(x.split()[1])*1024 for x in open("/proc/meminfo") if x.startswith("MemAvailable:")}; d=os.statvfs("."); print({"available_ram":m["MemAvailable"],"free_disk":d.f_bavail*d.f_frsize}); assert m["MemAvailable"]>=11*1024**3; assert d.f_bavail*d.f_frsize>=40*1024**3'
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo zstd
+          skopeo --version
+      - name: Bind successful producer, private package and immutable versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run }}
+          BUILD_COMMIT: ${{ inputs.build_commit }}
+          ARCH: ${{ inputs.architecture }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ inputs.source_digest }}
+        run: |
+          set -euo pipefail
+          python3 qualify-source.py bind --repository "$GITHUB_REPOSITORY" \
+            --build-run "$BUILD_RUN" --build-commit "$BUILD_COMMIT" --arch "$ARCH" \
+            --runtime-digest "$RUNTIME_DIGEST" --source-digest "$SOURCE_DIGEST" \
+            --output "$RUNNER_TEMP/source-binding.json"
+      - name: Read existing private OCI images without recompiling
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ inputs.source_digest }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/closure-registry-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://$image@$RUNTIME_DIGEST" "oci:$RUNNER_TEMP/closure-runtime:original"
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://$image@$SOURCE_DIGEST" "oci:$RUNNER_TEMP/closure-source:original"
+          python3 qualify-source.py inventory --binding "$RUNNER_TEMP/source-binding.json" \
+            --runtime-layout "$RUNNER_TEMP/closure-runtime" --source-layout "$RUNNER_TEMP/closure-source" \
+            --destination "$RUNNER_TEMP/closure-evidence"
+      - name: Fetch exact Alpine sources in separate unprivileged containers
+        run: bash fetch-apk-sources.sh "$RUNNER_TEMP/closure-evidence"
+      - name: Store complete candidate privately for independent review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          original_id=$(jq -er .package.id "$RUNNER_TEMP/source-binding.json")
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-before.json"
+          auth="$RUNNER_TEMP/closure-write-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          # This COPY-only scratch packaging never recompiles engine/server.
+          printf 'FROM scratch\nCOPY . /\n' > "$RUNNER_TEMP/closure-evidence.Dockerfile"
+          tag="ghcr.io/${GITHUB_REPOSITORY,,}:private-source-closure-${GITHUB_RUN_ID}"
+          docker build --file "$RUNNER_TEMP/closure-evidence.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag "$tag" "$RUNNER_TEMP/closure-evidence"
+          printf '%s' "$REGISTRY_TOKEN" | docker --config "$RUNNER_TEMP/closure-docker-auth" login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          trap 'rm -f "$auth"; rm -rf "$RUNNER_TEMP/closure-docker-auth"' EXIT
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-at-push.json"
+          docker --config "$RUNNER_TEMP/closure-docker-auth" push "$tag"
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-after.json"
+          digest=$(skopeo inspect --authfile "$auth" --format '{{.Digest}}' "docker://$tag")
+          printf 'Private source-closure candidate: %s@%s\n' "$tag" "$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Candidate only: no public binary distribution; review-required.json remains unresolved until independent component/source/license review.' >> "$GITHUB_STEP_SUMMARY"
+          python3 - "$RUNNER_TEMP/closure-evidence" <<'PY'
+          import hashlib,json,pathlib,sys
+          p=pathlib.Path(sys.argv[1])
+          print(json.dumps({name:hashlib.sha256((p/name).read_bytes()).hexdigest() for name in ['runtime-inventory.json','components.json','apk-source-checksums.json','review-required.json']},sort_keys=True))
+          PY
+  inspect:
+    if: github.event.repository.visibility == 'public' && inputs.operation == 'inspect'
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    env:
+      BUILD_RUN: ${{ inputs.build_run }}
+      BUILD_COMMIT: ${{ inputs.build_commit }}
+      ARCH: ${{ inputs.architecture }}
+      RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+      SOURCE_DIGEST: ${{ inputs.source_digest }}
+      CLOSURE_DIGEST: ${{ inputs.closure_digest }}
+      SELECTION_FILE: ${{ inputs.selection_file }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            docker/own-source-build
+            inspections
+      - name: Admit exact default-branch reader and committed bounded request
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          python3 test-source-closure.py
+          python3 - <<'PY'
+          import importlib.util,os,pathlib,re,subprocess
+          spec=importlib.util.spec_from_file_location('q','qualify-source.py');q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
+          assert q.DIGEST.fullmatch(os.environ['CLOSURE_DIGEST'])
+          name=os.environ['SELECTION_FILE']
+          if name:
+              assert re.fullmatch(r'inspections/[A-Za-z0-9_.-]+\.json',name)
+              root=pathlib.Path(os.environ['GITHUB_WORKSPACE']);p=q.inspection_file(root,name)
+              request=q.inspection_json(q.inspection_read(p,64*1024))
+              assert request.get('closure_digest')==os.environ['CLOSURE_DIGEST']
+              assert subprocess.check_output(['git','-C',str(root),'show','HEAD:'+name])==p.read_bytes()
+          PY
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python3 -c 'import os; d=os.statvfs("."); assert d.f_bavail*d.f_frsize>=40*1024**3'
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo zstd
+      - name: Freshly bind the successful original producer before any candidate read
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 qualify-source.py bind --repository "$GITHUB_REPOSITORY" \
+            --build-run "$BUILD_RUN" --build-commit "$BUILD_COMMIT" --arch "$ARCH" \
+            --runtime-digest "$RUNTIME_DIGEST" --source-digest "$SOURCE_DIGEST" \
+            --output "$RUNNER_TEMP/inspection-binding.json"
+      - name: Read exact private candidate and emit complete safely encoded evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/inspection-read-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://ghcr.io/${GITHUB_REPOSITORY,,}@$CLOSURE_DIGEST" "oci:$RUNNER_TEMP/inspection-candidate:original"
+          selection=()
+          if test -n "$SELECTION_FILE"; then selection=(--selection-file "$GITHUB_WORKSPACE/$SELECTION_FILE"); fi
+          # Rebind again, compare embedded binding, verify all OCI bytes, and
+          # validate the whole output before emitting the first framed record.
+          python3 qualify-source.py inspect --repository "$GITHUB_REPOSITORY" \
+            --build-run "$BUILD_RUN" --build-commit "$BUILD_COMMIT" --arch "$ARCH" \
+            --runtime-digest "$RUNTIME_DIGEST" --source-digest "$SOURCE_DIGEST" \
+            --closure-digest "$CLOSURE_DIGEST" --layout "$RUNNER_TEMP/inspection-candidate" \
+            --destination "$RUNNER_TEMP/inspection-evidence" "${selection[@]}"

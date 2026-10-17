@@ -1,0 +1,206 @@
+name: Publish independently reviewed source-built artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        required: true
+        type: string
+      build_commit:
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: choice
+        options: [arm64, amd64]
+        default: arm64
+      runtime_digest:
+        required: true
+        type: string
+      source_digest:
+        required: true
+        type: string
+      closure_digest:
+        description: Exact private source-closure candidate digest
+        required: true
+        type: string
+      review_file:
+        description: Committed reviews/*.json independent component/source/license review
+        required: true
+        type: string
+      review_sha256:
+        required: true
+        type: string
+      public_runtime_id:
+        description: Actual separate public runtime package ID after metadata-only setup
+        required: true
+        type: string
+      public_sources_id:
+        description: Actual separate public sources package ID after metadata-only setup
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: full-source-build
+  cancel-in-progress: false
+jobs:
+  publish_reviewed:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    env:
+      BUILD_RUN: ${{ inputs.build_run }}
+      BUILD_COMMIT: ${{ inputs.build_commit }}
+      ARCH: ${{ inputs.architecture }}
+      RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+      SOURCE_DIGEST: ${{ inputs.source_digest }}
+      CLOSURE_DIGEST: ${{ inputs.closure_digest }}
+      REVIEW_FILE: ${{ inputs.review_file }}
+      REVIEW_SHA256: ${{ inputs.review_sha256 }}
+      PUBLIC_RUNTIME_ID: ${{ inputs.public_runtime_id }}
+      PUBLIC_SOURCES_ID: ${{ inputs.public_sources_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            docker/own-source-build
+            reviews
+      - name: Default branch, committed review and disposable free standard runner
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 test-source-closure.py
+          python3 - <<'PY'
+          import hashlib,os,pathlib,re,subprocess
+          name=os.environ['REVIEW_FILE']; assert re.fullmatch(r'reviews/[A-Za-z0-9_.-]+\.json',name)
+          root=pathlib.Path(os.environ['GITHUB_WORKSPACE']); p=root/name
+          assert p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(root.resolve())
+          assert re.fullmatch(r'[0-9a-f]{64}',os.environ['REVIEW_SHA256'])
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==os.environ['REVIEW_SHA256']
+          subprocess.run(['git','-C',str(root),'ls-files','--error-unmatch','--',name],check=True)
+          PY
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python3 -c 'import os; d=os.statvfs("."); assert d.f_bavail*d.f_frsize>=40*1024**3'
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo zstd
+          skopeo --version
+      - name: Rebind original successful producer and all package identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 qualify-source.py bind --repository "$GITHUB_REPOSITORY" \
+            --build-run "$BUILD_RUN" --build-commit "$BUILD_COMMIT" --arch "$ARCH" \
+            --runtime-digest "$RUNTIME_DIGEST" --source-digest "$SOURCE_DIGEST" \
+            --output "$RUNNER_TEMP/producer-binding.json"
+          for item in runtime sources; do
+            if test "$item" = runtime; then id="$PUBLIC_RUNTIME_ID"; else id="$PUBLIC_SOURCES_ID"; fi
+            python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+              --name "${GITHUB_REPOSITORY#*/}-$item-public" --visibility public --expected-id "$id" \
+              --output "$RUNNER_TEMP/public-$item.json"
+          done
+      - name: Read and mechanically verify independently reviewed complete sources
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/review-read-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://ghcr.io/${GITHUB_REPOSITORY,,}@$CLOSURE_DIGEST" "oci:$RUNNER_TEMP/closure-candidate:original"
+          python3 qualify-source.py extract-evidence --layout "$RUNNER_TEMP/closure-candidate" \
+            --digest "$CLOSURE_DIGEST" --arch "$ARCH" --destination "$RUNNER_TEMP/public-source-evidence"
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])
+          actual=json.loads((p/'public-source-evidence/build-binding.json').read_text())
+          expected=json.loads((p/'producer-binding.json').read_text())
+          assert actual==expected, 'Closure candidate belongs to another producer/artifact binding'
+          PY
+          python3 qualify-source.py review --evidence "$RUNNER_TEMP/public-source-evidence" \
+            --review-file "$GITHUB_WORKSPACE/$REVIEW_FILE" --closure-digest "$CLOSURE_DIGEST" \
+            --output "$RUNNER_TEMP/source-verification.json"
+          cp "$GITHUB_WORKSPACE/$REVIEW_FILE" "$RUNNER_TEMP/public-source-evidence/reviewed-license-source-manifest.json"
+          cp "$RUNNER_TEMP/source-verification.json" "$RUNNER_TEMP/public-source-evidence/source-verification.json"
+          printf 'FROM scratch\nCOPY . /\n' > "$RUNNER_TEMP/public-sources.Dockerfile"
+          # Source packaging only; no engine/server compilation.
+          docker build --file "$RUNNER_TEMP/public-sources.Dockerfile" --tag reviewed-public-sources \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/public-source-evidence"
+          skopeo copy docker-daemon:reviewed-public-sources:latest "oci:$RUNNER_TEMP/reviewed-public-sources:verified"
+      - name: Publish complete sources first, prove anonymous source download, then runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/public-write-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          base="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${GITHUB_REPOSITORY#*/}"
+          tag="qualified-$BUILD_COMMIT-$BUILD_RUN-$ARCH"
+          sources_digest=$(jq -er '.manifests | select(length==1) | .[0].digest' "$RUNNER_TEMP/reviewed-public-sources/index.json")
+          python3 qualify-source.py tag-state --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}-sources-public" --visibility public --expected-id "$PUBLIC_SOURCES_ID" \
+            --tag "$tag" --digest "$sources_digest" --output "$RUNNER_TEMP/source-tag-state.json"
+          if test "$(jq -er .state "$RUNNER_TEMP/source-tag-state.json")" = absent; then
+            skopeo copy --all --preserve-digests --dest-authfile "$auth" \
+              "oci:$RUNNER_TEMP/reviewed-public-sources:verified" "docker://$base-sources-public:$tag"
+          fi
+          # Explicit no-creds prevents fallback to any runner authentication.
+          skopeo copy --all --preserve-digests --src-no-creds \
+            "docker://$base-sources-public@$sources_digest" "oci:$RUNNER_TEMP/anonymous-sources:downloaded"
+          python3 qualify-source.py extract-evidence --layout "$RUNNER_TEMP/anonymous-sources" \
+            --digest "$sources_digest" --arch "$ARCH" --destination "$RUNNER_TEMP/anonymous-source-evidence"
+          python3 qualify-source.py review --evidence "$RUNNER_TEMP/anonymous-source-evidence" \
+            --review-file "$GITHUB_WORKSPACE/$REVIEW_FILE" --closure-digest "$CLOSURE_DIGEST" \
+            --output "$RUNNER_TEMP/anonymous-source-verification.json"
+          # Recheck both public identities and the original private pilot at
+          # the actual runtime-write boundary, never change their visibility.
+          original_id=$(jq -er .package.id "$RUNNER_TEMP/producer-binding.json")
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" --name "${GITHUB_REPOSITORY#*/}" \
+            --visibility private --expected-id "$original_id" --output "$RUNNER_TEMP/pilot-still-private.json"
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" --name "${GITHUB_REPOSITORY#*/}-sources-public" \
+            --visibility public --expected-id "$PUBLIC_SOURCES_ID" --output "$RUNNER_TEMP/sources-at-runtime-push.json"
+          python3 qualify-source.py tag-state --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}-runtime-public" --visibility public --expected-id "$PUBLIC_RUNTIME_ID" \
+            --tag "$tag" --digest "$RUNTIME_DIGEST" --output "$RUNNER_TEMP/runtime-tag-state.json"
+          if test "$(jq -er .state "$RUNNER_TEMP/runtime-tag-state.json")" = absent; then
+            skopeo copy --all --preserve-digests --src-authfile "$auth" --dest-authfile "$auth" \
+              "docker://ghcr.io/${GITHUB_REPOSITORY,,}@$RUNTIME_DIGEST" "docker://$base-runtime-public:$tag"
+          fi
+          skopeo copy --all --preserve-digests --src-no-creds \
+            "docker://$base-runtime-public@$RUNTIME_DIGEST" "oci:$RUNNER_TEMP/anonymous-runtime:downloaded"
+          python3 - <<'PY'
+          import importlib.util,json,os,pathlib
+          spec=importlib.util.spec_from_file_location('q','qualify-source.py');q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); b=json.loads((root/'producer-binding.json').read_text())
+          manifest,config=q.image(root/'anonymous-runtime',b['runtime_digest'],b['architecture'])
+          labels=config['config']['Labels']
+          assert labels['org.opencontainers.image.revision']==b['build_commit']
+          assert labels['org.opencontainers.image.source']=='https://github.com/'+b['repository']
+          print(json.dumps({'runtime_digest':b['runtime_digest'],'anonymous_all_blob_download_verified':True,'document_session_qualified':False}))
+          PY
+          for item in runtime sources; do
+            if test "$item" = runtime; then id="$PUBLIC_RUNTIME_ID"; else id="$PUBLIC_SOURCES_ID"; fi
+            python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+              --name "${GITHUB_REPOSITORY#*/}-$item-public" --visibility public --expected-id "$id" \
+              --output "$RUNNER_TEMP/public-$item-after.json"
+          done
+          printf 'Anonymous runtime: %s-runtime-public@%s\nComplete reviewed sources: %s-sources-public@%s\nReview SHA256: %s\n' \
+            "$base" "$RUNTIME_DIGEST" "$base" "$sources_digest" "$REVIEW_SHA256" | tee -a "$GITHUB_STEP_SUMMARY"
