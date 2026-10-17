@@ -1,0 +1,129 @@
+name: Qualify existing source-built artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful original source-build run ID
+        required: true
+        type: string
+      build_commit:
+        description: Exact full commit of that successful source build
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: choice
+        options: [arm64, amd64]
+        default: arm64
+      runtime_digest:
+        description: Original private runtime sha256 digest from the producing run
+        required: true
+        type: string
+      source_digest:
+        description: Original private source-evidence sha256 digest from the producing run
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: full-source-build
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/own-source-build
+      - name: Admit only a disposable public standard runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          python3 test-source-closure.py
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python3 -c 'import os; m={x.split(":")[0]:int(x.split()[1])*1024 for x in open("/proc/meminfo") if x.startswith("MemAvailable:")}; d=os.statvfs("."); print({"available_ram":m["MemAvailable"],"free_disk":d.f_bavail*d.f_frsize}); assert m["MemAvailable"]>=11*1024**3; assert d.f_bavail*d.f_frsize>=40*1024**3'
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo zstd
+          skopeo --version
+      - name: Bind successful producer, private package and immutable versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run }}
+          BUILD_COMMIT: ${{ inputs.build_commit }}
+          ARCH: ${{ inputs.architecture }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ inputs.source_digest }}
+        run: |
+          set -euo pipefail
+          python3 qualify-source.py bind --repository "$GITHUB_REPOSITORY" \
+            --build-run "$BUILD_RUN" --build-commit "$BUILD_COMMIT" --arch "$ARCH" \
+            --runtime-digest "$RUNTIME_DIGEST" --source-digest "$SOURCE_DIGEST" \
+            --output "$RUNNER_TEMP/source-binding.json"
+      - name: Read existing private OCI images without recompiling
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          RUNTIME_DIGEST: ${{ inputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ inputs.source_digest }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/closure-registry-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://$image@$RUNTIME_DIGEST" "oci:$RUNNER_TEMP/closure-runtime:original"
+          skopeo copy --all --preserve-digests --src-authfile "$auth" \
+            "docker://$image@$SOURCE_DIGEST" "oci:$RUNNER_TEMP/closure-source:original"
+          python3 qualify-source.py inventory --binding "$RUNNER_TEMP/source-binding.json" \
+            --runtime-layout "$RUNNER_TEMP/closure-runtime" --source-layout "$RUNNER_TEMP/closure-source" \
+            --destination "$RUNNER_TEMP/closure-evidence"
+      - name: Fetch exact Alpine sources in separate unprivileged containers
+        run: bash fetch-apk-sources.sh "$RUNNER_TEMP/closure-evidence"
+      - name: Store complete candidate privately for independent review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          original_id=$(jq -er .package.id "$RUNNER_TEMP/source-binding.json")
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-before.json"
+          auth="$RUNNER_TEMP/closure-write-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          # This COPY-only scratch packaging never recompiles engine/server.
+          printf 'FROM scratch\nCOPY . /\n' > "$RUNNER_TEMP/closure-evidence.Dockerfile"
+          tag="ghcr.io/${GITHUB_REPOSITORY,,}:private-source-closure-${GITHUB_RUN_ID}"
+          docker build --file "$RUNNER_TEMP/closure-evidence.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag "$tag" "$RUNNER_TEMP/closure-evidence"
+          printf '%s' "$REGISTRY_TOKEN" | docker --config "$RUNNER_TEMP/closure-docker-auth" login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          trap 'rm -f "$auth"; rm -rf "$RUNNER_TEMP/closure-docker-auth"' EXIT
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-at-push.json"
+          docker --config "$RUNNER_TEMP/closure-docker-auth" push "$tag"
+          python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" \
+            --name "${GITHUB_REPOSITORY#*/}" --visibility private --expected-id "$original_id" \
+            --output "$RUNNER_TEMP/private-closure-after.json"
+          digest=$(skopeo inspect --authfile "$auth" --format '{{.Digest}}' "docker://$tag")
+          printf 'Private source-closure candidate: %s@%s\n' "$tag" "$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Candidate only: no public binary distribution; review-required.json remains unresolved until independent component/source/license review.' >> "$GITHUB_STEP_SUMMARY"
+          python3 - "$RUNNER_TEMP/closure-evidence" <<'PY'
+          import hashlib,json,pathlib,sys
+          p=pathlib.Path(sys.argv[1])
+          print(json.dumps({name:hashlib.sha256((p/name).read_bytes()).hexdigest() for name in ['runtime-inventory.json','components.json','apk-source-checksums.json','review-required.json']},sort_keys=True))
+          PY

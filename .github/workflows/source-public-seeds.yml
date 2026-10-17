@@ -1,0 +1,85 @@
+name: Prepare separate license-only public package seeds
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: source-public-package-metadata
+  cancel-in-progress: false
+jobs:
+  metadata_only:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: docker/own-source-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/own-source-build
+      - name: Standard runner and registry tooling only
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          python3 test-source-closure.py
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo
+          skopeo --version
+      - name: Create and read back only license and input metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$RUNNER_TEMP/seed-auth.json"
+          trap 'rm -f "$auth"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          for suffix in runtime-public sources-public; do
+            name="${GITHUB_REPOSITORY#*/}-$suffix"
+            set +e
+            python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" --name "$name" \
+              --visibility private --allow-metadata-seed --output "$RUNNER_TEMP/$name-package.json"
+            state=$?
+            set -e
+            case "$state" in
+              3)
+                python3 qualify-source.py seed-layout --repository "$GITHUB_REPOSITORY" --name "$name" \
+                  --license-file LICENSE --inputs-file upstream.lock.json --arch arm64 \
+                  --destination "$RUNNER_TEMP/$name-seed" --output "$RUNNER_TEMP/$name-seed.json"
+                # Exactly one new two-file OCI seed, no runtime/base ancestor.
+                # An uncertain push is not retried automatically.
+                skopeo copy --all --preserve-digests --dest-authfile "$auth" \
+                  "oci:$RUNNER_TEMP/$name-seed:seed" \
+                  "docker://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name:metadata-bootstrap-$GITHUB_SHA"
+                ;;
+              0)
+                echo 'An existing target is not overwritten. Inspect its original seed receipt before continuing.' >&2
+                exit 1
+                ;;
+              *) exit "$state" ;;
+            esac
+            python3 qualify-source.py package --repository "$GITHUB_REPOSITORY" --name "$name" \
+              --visibility private --output "$RUNNER_TEMP/$name-package.json"
+            digest=$(jq -er .digest "$RUNNER_TEMP/$name-seed.json")
+            skopeo copy --all --preserve-digests --src-authfile "$auth" \
+              "docker://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name@$digest" \
+              "oci:$RUNNER_TEMP/$name-readback:original"
+            python3 qualify-source.py verify-seed --layout "$RUNNER_TEMP/$name-readback" --digest "$digest" \
+              --arch arm64 --license-file LICENSE --inputs-file upstream.lock.json \
+              --output "$RUNNER_TEMP/$name-verified.json"
+            python3 - "$RUNNER_TEMP/$name-package.json" "$RUNNER_TEMP/$name-verified.json" <<'PY'
+          import json,os,sys
+          package=json.load(open(sys.argv[1])); verified=json.load(open(sys.argv[2]))
+          result={'package':package,'license_only_content':verified,'visibility_change_performed':False}
+          text=json.dumps(result,sort_keys=True)
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('```json\n'+text+'\n```\n')
+          PY
+          done
