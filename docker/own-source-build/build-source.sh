@@ -111,7 +111,20 @@ verify_source_inputs() (
 preflight_browser_sources() {
     # Own fresh offline-install cache only; never remove an existing directory.
     test ! -e browser/.source-preflight-npm-cache && test ! -L browser/.source-preflight-npm-cache || return 1
-    npm_config_cache="$(pwd)/browser/.source-preflight-npm-cache" make -j1 -C browser node_modules || return 1
+    # The pinned server configure needs POCO from a completed engine build.
+    # Bootstrap only the official browser inputs here; configure runs later.
+    test "$(sha256sum browser/Makefile.am | cut -d ' ' -f1)" = bee32e3a36b01fba78d24b12083bdd736ec1884bcd210883f4ff28245236138c || return 1
+    test "$(sha256sum browser/package.json | cut -d ' ' -f1)" = a6de1f7ff2e992e2a945dd276bdcfe0ea9c5e599349116be4a505b3b1c311cb2 || return 1
+    test "$(sha256sum browser/npm-shrinkwrap.json.in | cut -d ' ' -f1)" = f86e200a4ce3107242d5adcf2a5c1398bfee75081211d8f28c86537f14d1ec85 || return 1
+    for generated in npm-shrinkwrap.json package-lock.json node_modules; do
+        test ! -e "browser/$generated" && test ! -L "browser/$generated" || return 1
+    done
+    # This exact .in has no Autoconf substitutions; copy the unchanged bytes.
+    cp browser/npm-shrinkwrap.json.in browser/npm-shrinkwrap.json || return 1
+    cp browser/npm-shrinkwrap.json browser/package-lock.json || return 1
+    (cd browser && UV_USE_IO_URING=0 npm_config_cache="$(pwd)/.source-preflight-npm-cache" npm ci --offline) || return 1
+    cmp browser/npm-shrinkwrap.json.in browser/npm-shrinkwrap.json || return 1
+    cmp browser/npm-shrinkwrap.json browser/package-lock.json || return 1
     rm -rf -- browser/.source-preflight-npm-cache || return 1
     (cd browser && node node_modules/stylelint/bin/stylelint.js --config .stylelintrc.json css/*.css --fix) || return 1
     verify_source_inputs || return 1
@@ -401,13 +414,8 @@ cd /build/online/engine
 # BUILD_TYPE is the actual module/download selector, not an unexported option.
 verify_font_configuration config_host.mk
 grep -E '^export (BUILD_TYPE|WITH_FONTS|DO_FETCH_TARBALLS)=' config_host.mk > /build/offer/notices/engine-font-policy.txt
-# Release configure permits a not-yet-installed runtime; headers and engine
-# configuration are present. Use the unchanged offline upstream npm target.
+# Browser source checks do not need the engine-dependent server configure.
 cd /build/online
-./autogen.sh
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
-    --disable-tests --with-lokit-path=/build/online/engine/include \
-    --with-lo-path=/opt/collaboraoffice
 preflight_browser_sources
 record_source_preflight /build/offer
 printf '[source-build] source_preflight=passed source_tree=%s\n' "$(cat /build/offer/notices/preheavy-source-tree.txt)"
@@ -421,6 +429,11 @@ mkdir -p /build/instdir/opt
 # through these links; upstream source trees are archived before cleanup.
 cp -al instdir /build/instdir/opt/collaboraoffice
 cd /build/online
+# POCO headers/libraries now exist in the successfully built engine workdir.
+./autogen.sh
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+    --disable-tests --with-lokit-path=/build/online/engine/include \
+    --with-lo-path=/opt/collaboraoffice
 make -j1
 make -j1 collabora-online-sbom.spdx.json
 DESTDIR=/build/instdir make install

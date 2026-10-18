@@ -29,18 +29,24 @@ archive, binary patch, lock and modification manifest. Unknown source changes
 still fail early and at the final archive gate. No final `git add -A` or ignored
 diff can make a changed source offer pass.
 
-The same release Online configure and regular offline browser dependency target
-run before engine `make`. Only their newly created per-install npm download cache
-is retired; installed modules and vendored sources remain. An existing cache path
-is refused without deletion. The actual CSS step then executes, followed by the
-strict two-file/hash check. A small preheavy source-tree/binary-patch checkpoint
-and empty-tree archive/compressor smoke test catch source/tooling failures before
-heavy work; final archiving must match that exact tree and patch. The unchanged
-core qualifier still verifies every source-offer checksum, producing recipe and
-upstream lock. Font selection, full components and compact hardlink/cache policy
-are unchanged. These checkpoints do not preserve compiled output across an
-expired ephemeral builder. No old compiler cache reuse is claimed, and a durable
-compiler checkpoint needs its own measured storage/resource qualification.
+Before engine compilation, the browser alone is prepared from the exact pinned
+package.json and substitution-free npm-shrinkwrap.json.in. Their SHA256 values
+and the upstream Makefile are checked. Byte-identical generated lock files,
+upstream UV_USE_IO_URING=0 and npm ci --offline use vendored node_shrinkpack
+inputs and a fresh per-install cache. Existing generated paths or cache are
+refused without deletion. Only this new download cache is retired; installed
+modules and vendored sources remain. The real CSS step and strict two-file/hash
+check then run. The full staged Git archive and its compressed/decompressed
+streams are hashed and counted before heavy work, without retaining another
+archive; final archives must match that exact tree and patch.
+
+The full Online autogen/configure runs only after successful engine make: its
+POCO headers are produced by that engine build. The later upstream Makefile and
+regular offline dependency target are unchanged and may reinstall modules.
+The unchanged core qualifier still verifies every source-offer checksum,
+producing recipe and upstream lock. Font selection, full components and compact
+hardlink/cache policy are unchanged. These checks do not preserve compiled
+output across an expired ephemeral builder. No compiler-cache reuse is claimed.
 
 The Actions-based path described below is suspended and retained only as historical
 build/provenance documentation. It does not authorize a dispatch, rerun or package
@@ -114,15 +120,15 @@ Primary sources:
 - [Mozilla MPL distribution FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/)
 - [MPL 2.0, executable distribution section 3.2](https://www.mozilla.org/en-US/MPL/2.0/#distribution-of-executable-form)
 
-## Bounded source-measurement candidate
+## Historical bounded source-measurement candidate
 
-This revision is prepared for a non-publishing Linux/AMD64 experiment with an
-unchanged 2-GiB builder memory limit and a 4-GiB temporary state volume.
-The builder stage also bounds the Alpine Samurai/Ninja provider to one job.
-A complete build within these limits has not been demonstrated. No result
-from this experiment is a source/license clearance or an editor acceptance.
-The four historical GitHub Actions workflows remain suspended; do not dispatch
-or rerun them to execute this experiment.
+An earlier non-publishing Linux/AMD64 experiment used a 2-GiB builder memory
+limit and a 4-GiB temporary state volume. Those historical values do not describe
+the current executor contract. Resource limits are supplied and measured by the
+external executor; no measured minimum or full-build fit is claimed here.
+The builder stage bounds the Alpine Samurai/Ninja provider to one job.
+No resource experiment is source/license clearance or editor acceptance.
+The four historical GitHub Actions workflows remain suspended.
 The source verifier resolves the Online Git root even when invoked from the
 engine directory. Before the long compiler run, the actual staged Git archive
 and its Zstandard stream are hashed and counted synchronously without keeping
