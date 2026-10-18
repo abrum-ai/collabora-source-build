@@ -21,6 +21,27 @@ a separate patch, base/tree/file/archive hashes and the original Argon2 CC0/Apac
 Argon2 archive and the upstream Argon2 build patches remain in the source offer.
 These are component evidence, not a completed independent license review.
 
+The pinned browser CSS rule unconditionally runs Stylelint13.7 with `--fix`.
+One tracked tab-strip file needs a deterministic whitespace normalization. A
+second exact hash-checked patch applies that known change before compilation;
+both changed files are explicitly staged and included in the actual Git source
+archive, binary patch, lock and modification manifest. Unknown source changes
+still fail early and at the final archive gate. No final `git add -A` or ignored
+diff can make a changed source offer pass.
+
+The same release Online configure and regular offline browser dependency target
+run before engine `make`. Only their newly created per-install npm download cache
+is retired; installed modules and vendored sources remain. An existing cache path
+is refused without deletion. The actual CSS step then executes, followed by the
+strict two-file/hash check. A small preheavy source-tree/binary-patch checkpoint
+and empty-tree archive/compressor smoke test catch source/tooling failures before
+heavy work; final archiving must match that exact tree and patch. The unchanged
+core qualifier still verifies every source-offer checksum, producing recipe and
+upstream lock. Font selection, full components and compact hardlink/cache policy
+are unchanged. These checkpoints do not preserve compiled output across an
+expired ephemeral builder. No old compiler cache reuse is claimed, and a durable
+compiler checkpoint needs its own measured storage/resource qualification.
+
 The Actions-based path described below is suspended and retained only as historical
 build/provenance documentation. It does not authorize a dispatch, rerun or package
 publication. The regular successor must run through a separately reviewed CLI path
@@ -102,3 +123,25 @@ A complete build within these limits has not been demonstrated. No result
 from this experiment is a source/license clearance or an editor acceptance.
 The four historical GitHub Actions workflows remain suspended; do not dispatch
 or rerun them to execute this experiment.
+The source verifier resolves the Online Git root even when invoked from the
+engine directory. Before the long compiler run, the actual staged Git archive
+and its Zstandard stream are hashed and counted synchronously without keeping
+another archive on disk. Final compressed bytes and the full decompressed
+readback must match that measurement.
+
+After every engine/server/browser/SPDX/install make and notice/config copy has
+completed, only the builder's `engine/workdir/CObject` and `CxxObject` trees may
+be removed. The exact pinned gbuild layout permits regular `.o`/`.dwo` outputs
+there; tracked files, other types, symlinks and mounted subtrees stop the build.
+The complete staged installation (file bytes, modes and symlink text), original
+tarballs and copied source/notice offer are recorded before unlink and compared
+afterwards. Installed hardlinks retain their bytes; link counts and ctime can
+change. Build-dependent or escaping runtime symlinks are rejected. All Git,
+UnpackedTarball, CustomTarget, ExternalProject and original tarball inputs stay
+in place until the existing end-of-RUN cleanup. No make runs after object cleanup.
+
+Both final archives require complete byte/decompression readback; external
+tarballs must still match the pre-cleanup inventory. Actual free-block change
+is recorded separately from the object allocation upper bound. This is no
+compiler checkpoint or proof that a real archive peak fits a resource limit.
+

@@ -4,9 +4,17 @@
   "canonical_repository": "https://gerrit.collaboraoffice.com/online",
   "commit": "28a3cf1a0edd6712e4079fdad8e46f5cbe6b8af8",
   "version": "26.04.6.0",
-  "components": ["engine", "wsd", "kit", "browser"],
+  "components": [
+    "engine",
+    "wsd",
+    "kit",
+    "browser"
+  ],
   "base_image": "docker.io/library/alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507",
-  "platforms": ["linux/amd64", "linux/arm64"],
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
   "build_parallelism": 1,
   "source_patches": [
     {
@@ -14,6 +22,14 @@
       "path": "engine/RepositoryExternal.mk",
       "original_sha256": "baeae35034eaa188ee73819ad45327c345e3fd08c6426b273d5597191d6cc6c6",
       "modified_sha256": "127e9cf7c8a46311650887128abfe9765d6c6db46fed9e20aae213d119f78de7",
+      "license": "MPL-2.0",
+      "evidence": "source-modifications.json"
+    },
+    {
+      "id": "pinned-css-stylelint-normalization",
+      "path": "browser/css/qtapp-tabstrip.css",
+      "original_sha256": "01dd2b158aa38c2165b003cab20f667f0b8bf02e68e26cfde1107c431d332694",
+      "modified_sha256": "c8809ee6e43429c74272d0d3b59cfec7cb5d78d5899c87c1fb66ddcf7aa17953",
       "license": "MPL-2.0",
       "evidence": "source-modifications.json"
     }
