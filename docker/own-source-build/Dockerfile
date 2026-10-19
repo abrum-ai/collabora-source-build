@@ -42,7 +42,7 @@ COPY --from=builder /build/offer/ /
 
 FROM docker.io/library/alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507 AS runtime-base
 RUN apk add --no-cache \
-    libpng fontconfig cpio tzdata findutils libcap libcap-utils openssl \
+    libpng fontconfig cpio tzdata findutils coreutils libcap libcap-utils openssl \
     libxcb libxrender libxext libstdc++ libgcc linux-pam zstd-libs libintl \
     font-noto-cjk font-dejavu ca-certificates bash && \
     addgroup -S -g 1001 cool && \
@@ -67,7 +67,7 @@ USER 1001:1001
 EXPOSE 9980
 
 FROM runtime-base AS test
-RUN /usr/bin/coolwsd --version && \
+RUN /usr/bin/timeout --kill-after=2s 10s /usr/bin/coolwsd --version-hash && \
     test -s /usr/bin/coolwsd && test -s /usr/bin/coolforkit-ns && \
     test -s /opt/collaboraoffice/program/libmergedlo.so && \
     test -s /usr/share/coolwsd/browser/dist/cool.html && \
